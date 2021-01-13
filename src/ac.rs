@@ -1,6 +1,6 @@
 use super::util::sign_pow;
 
-pub fn encode(value: [f32; 3], maximum_value: f32) -> u32 {
+pub fn encode(value: &[f32; 3], maximum_value: f32) -> u32 {
     let quant_r = i32::max(
         0,
         i32::min(

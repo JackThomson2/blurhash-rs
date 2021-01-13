@@ -21,13 +21,15 @@
 //! let pixels = decode("LBAdAqof00WCqZj[PDay0.WB}pof", 50, 50, 1.0);
 //! ```
 //! [1]: https://github.com/woltapp/blurhash
+
 mod ac;
 mod base83;
 mod dc;
 mod util;
 
-use std::f32::consts::PI;
-pub use util::{linear_to_srgb, srgb_to_linear};
+use fastapprox::faster::cosfull;
+use std::{cmp::Ordering, f32::consts::PI};
+pub use util::{linear_to_srgb, pre_compute_data_linear, srgb_to_linear};
 
 /// Calculates the blurhash for an image using the given x and y component counts.
 pub fn encode(components_x: u32, components_y: u32, width: u32, height: u32, rgb: &[u8]) -> String {
@@ -35,16 +37,20 @@ pub fn encode(components_x: u32, components_y: u32, width: u32, height: u32, rgb
         panic!("BlurHash must have between 1 and 9 components");
     }
 
-    let mut factors: Vec<[f32; 3]> = Vec::new();
+    let pre_computed = pre_compute_data_linear(rgb);
+    let factors: Vec<[f32; 3]> = (0..components_y)
+        .into_iter()
+        .map(|y| {
+            (0..components_x)
+                .into_iter()
+                .map(|x| (x, y))
+                .collect::<Vec<(u32, u32)>>()
+        })
+        .flatten()
+        .map(|(x, y)| multiply_basis_function(x, y, width, height, &pre_computed))
+        .collect();
 
-    for y in 0..components_y {
-        for x in 0..components_x {
-            let factor = multiply_basis_function(x, y, width, height, rgb);
-            factors.push(factor);
-        }
-    }
-
-    let dc = factors[0];
+    let dc = &factors[0];
     let ac = &factors[1..];
 
     let mut blurhash = String::new();
@@ -54,17 +60,15 @@ pub fn encode(components_x: u32, components_y: u32, width: u32, height: u32, rgb
 
     let maximum_value: f32;
     if !ac.is_empty() {
-        let mut actualmaximum_value = 0.0;
-        for i in 0..components_y * components_x - 1 {
-            actualmaximum_value = f32::max(ac[i as usize][0], actualmaximum_value);
-            actualmaximum_value = f32::max(ac[i as usize][1], actualmaximum_value);
-            actualmaximum_value = f32::max(ac[i as usize][2], actualmaximum_value);
-        }
-
-        let quantised_maximum_value = f32::max(
-            0.,
-            f32::min(82., f32::floor(actualmaximum_value * 166. - 0.5)),
-        ) as u32;
+        let actual_maximum_value = ac
+            .into_iter()
+            .map(|[a, b, c]| f32::max(f32::max(f32::abs(*a), f32::abs(*b)), f32::abs(*c)))
+            .max_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal))
+            .unwrap();
+        let quantised_maximum_value = u32::max(
+            0,
+            u32::min(82, f32::floor(actual_maximum_value * 166f32 - 0.5) as u32),
+        );
 
         maximum_value = (quantised_maximum_value + 1) as f32 / 166.;
         blurhash.push_str(&base83::encode(quantised_maximum_value, 1));
@@ -77,7 +81,7 @@ pub fn encode(components_x: u32, components_y: u32, width: u32, height: u32, rgb
 
     for i in 0..components_y * components_x - 1 {
         blurhash.push_str(&base83::encode(
-            ac::encode(ac[i as usize], maximum_value),
+            ac::encode(&ac[i as usize], maximum_value),
             2,
         ));
     }
@@ -90,7 +94,7 @@ fn multiply_basis_function(
     component_y: u32,
     width: u32,
     height: u32,
-    rgb: &[u8],
+    computed: &Vec<f32>,
 ) -> [f32; 3] {
     let mut r = 0.;
     let mut g = 0.;
@@ -100,15 +104,21 @@ fn multiply_basis_function(
         _ => 2.,
     };
 
-    let bytes_per_row = width * 4;
+    let mut x = 0;
+    let mut y = 0;
 
-    for y in 0..height {
-        for x in 0..width {
-            let basis = f32::cos(PI * component_x as f32 * x as f32 / width as f32)
-                * f32::cos(PI * component_y as f32 * y as f32 / height as f32);
-            r += basis * srgb_to_linear(u32::from(rgb[(4 * x + y * bytes_per_row) as usize]));
-            g += basis * srgb_to_linear(u32::from(rgb[(4 * x + 1 + y * bytes_per_row) as usize]));
-            b += basis * srgb_to_linear(u32::from(rgb[(4 * x + 2 + y * bytes_per_row) as usize]));
+    for rgba in computed.chunks_exact(4) {
+        let basis = cosfull(PI * component_x as f32 * x as f32 / width as f32)
+            * cosfull(PI * component_y as f32 * y as f32 / height as f32);
+
+        r += basis * rgba[0];
+        g += basis * rgba[1];
+        b += basis * rgba[2];
+
+        x += 1;
+        if x >= width {
+            x = 0;
+            y += 1;
         }
     }
 
@@ -196,15 +206,21 @@ mod tests {
     use super::{decode, encode};
     use image::GenericImageView;
     use image::{save_buffer, RGBA};
+    use std::time::Instant;
 
     #[test]
     fn decode_blurhash() {
         let img = image::open("octocat.png").unwrap();
+        let (origwidth, origheight) = img.dimensions();
+
+        let start = Instant::now();
+        let img = img.thumbnail(32, 32);
         let (width, height) = img.dimensions();
 
         let blurhash = encode(4, 3, width, height, &img.to_rgba().into_vec());
-        let img = decode(&blurhash, width, height, 1.0);
-        save_buffer("out.png", &img, width, height, RGBA(8)).unwrap();
+        println!("This took {:?} sting is {}", start.elapsed(), blurhash);
+        let img = decode(&blurhash, origwidth, origheight, 1.0);
+        save_buffer("out4.png", &img, origwidth, origheight, RGBA(8)).unwrap();
 
         assert_eq!(img[0..5], [45, 1, 56, 255, 45]);
     }

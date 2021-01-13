@@ -11,7 +11,9 @@ pub fn encode(value: u32, length: u32) -> String {
 
     for i in 1..=length {
         let digit: u32 = (value / u32::pow(83, length - i)) % 83;
-        result.push_str(&CHARACTORS[digit as usize].to_string());
+        unsafe {
+            result.push(*CHARACTORS.get_unchecked(digit as usize));
+        }
     }
 
     result
