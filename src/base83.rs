@@ -6,15 +6,19 @@ static CHARACTORS: [char; 83] = [
     ']', '^', '_', '{', '|', '}', '~',
 ];
 
-pub fn encode(value: u32, length: u32) -> String {
-    let mut result = String::new();
-
+#[inline]
+pub fn encode_no_alloc(value: u32, length: u32, result: &mut String) {
     for i in 1..=length {
         let digit: u32 = (value / u32::pow(83, length - i)) % 83;
         unsafe {
             result.push(*CHARACTORS.get_unchecked(digit as usize));
         }
     }
+}
+
+pub fn encode(value: u32, length: u32) -> String {
+    let mut result = String::new();
+    encode_no_alloc(value, length, &mut result);
 
     result
 }

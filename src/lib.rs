@@ -27,7 +27,7 @@ mod base83;
 mod dc;
 mod util;
 
-use fastapprox::faster::cosfull;
+use base83::encode_no_alloc;
 use std::{cmp::Ordering, f32::consts::PI};
 pub use util::{linear_to_srgb, pre_compute_data_linear, srgb_to_linear};
 
@@ -65,25 +65,23 @@ pub fn encode(components_x: u32, components_y: u32, width: u32, height: u32, rgb
             .map(|[a, b, c]| f32::max(f32::max(f32::abs(*a), f32::abs(*b)), f32::abs(*c)))
             .max_by(|a, b| a.partial_cmp(b).unwrap_or(Ordering::Equal))
             .unwrap();
+
         let quantised_maximum_value = u32::max(
             0,
             u32::min(82, f32::floor(actual_maximum_value * 166f32 - 0.5) as u32),
         );
 
         maximum_value = (quantised_maximum_value + 1) as f32 / 166.;
-        blurhash.push_str(&base83::encode(quantised_maximum_value, 1));
+        encode_no_alloc(quantised_maximum_value, 1, &mut blurhash);
     } else {
         maximum_value = 1.;
-        blurhash.push_str(&base83::encode(0, 1));
+        encode_no_alloc(0, 1, &mut blurhash);
     }
 
-    blurhash.push_str(&base83::encode(dc::encode(dc), 4));
+    encode_no_alloc(dc::encode(dc), 4, &mut blurhash);
 
     for i in 0..components_y * components_x - 1 {
-        blurhash.push_str(&base83::encode(
-            ac::encode(&ac[i as usize], maximum_value),
-            2,
-        ));
+        encode_no_alloc(ac::encode(&ac[i as usize], maximum_value), 2, &mut blurhash);
     }
 
     blurhash
@@ -104,19 +102,26 @@ fn multiply_basis_function(
         _ => 2.,
     };
 
+    let x_lut: Vec<f32> = (0..width)
+        .map(|x| f32::cos(PI * component_x as f32 * x as f32 / width as f32))
+        .collect();
+
+    let y_lut: Vec<f32> = (0..height)
+        .map(|y| f32::cos(PI * component_y as f32 * y as f32 / height as f32))
+        .collect();
+
     let mut x = 0;
     let mut y = 0;
 
     for rgba in computed.chunks_exact(4) {
-        let basis = cosfull(PI * component_x as f32 * x as f32 / width as f32)
-            * cosfull(PI * component_y as f32 * y as f32 / height as f32);
+        let basis = unsafe { *x_lut.get_unchecked(x) * *y_lut.get_unchecked(y) };
 
         r += basis * rgba[0];
         g += basis * rgba[1];
         b += basis * rgba[2];
 
         x += 1;
-        if x >= width {
+        if x >= width as usize {
             x = 0;
             y += 1;
         }
@@ -210,14 +215,14 @@ mod tests {
 
     #[test]
     fn decode_blurhash() {
-        let img = image::open("octocat.png").unwrap();
+        let img = image::open("test4.jpg").unwrap();
         let (origwidth, origheight) = img.dimensions();
 
         let start = Instant::now();
-        let img = img.thumbnail(32, 32);
+        // let img = img.thumbnail(32, 32);
         let (width, height) = img.dimensions();
 
-        let blurhash = encode(4, 3, width, height, &img.to_rgba().into_vec());
+        let blurhash = encode(2, 4, width, height, &img.to_rgba().into_vec());
         println!("This took {:?} sting is {}", start.elapsed(), blurhash);
         let img = decode(&blurhash, origwidth, origheight, 1.0);
         save_buffer("out4.png", &img, origwidth, origheight, RGBA(8)).unwrap();
